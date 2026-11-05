@@ -14,6 +14,16 @@
   var rand = function (a, b) { return a + Math.random() * (b - a); };
   var skipFromUrl = /[?&]skip(=|&|$)/.test(location.search);
 
+  // URLSearchParams decodes spaces, Unicode and & in personalized invitation links.
+  var guestName = (new URLSearchParams(location.search).get('name') || '').replace(/\s+/g, ' ').trim();
+  var greeting = $('#guestGreeting');
+  if (greeting && guestName) {
+    greeting.textContent = 'Namaste, ' + guestName;
+    greeting.title = 'Namaste, ' + guestName;
+    if (guestName.length > 35) greeting.classList.add('intro__eyebrow--long');
+  }
+
+
   /* ---------------------------------------------------------------
      Floating gold dust
      --------------------------------------------------------------- */
@@ -61,12 +71,14 @@
   var Sound = (function () {
     var btn = $('#musicBtn');
     var ctx = null, master = null, bus = null, timer = null, audioEl = null;
-    var on = false;
+    var wantOn = CFG.musicDefault !== false;   // music is on by default
+    var on = false, manualOff = false;
     var scale = [261.63, 293.66, 329.63, 392.0, 440.0, 523.25, 587.33, 659.25]; // Bhoopali (C D E G A)
     var phrases = [
       [0, 2, 3, 5, 3, 2, 0, null], [3, 5, 6, 5, 3, 2, 3, null], [0, null, 2, 3, 2, 0, 1, null], [5, 6, 7, 6, 5, 3, 2, 0]
     ];
     var step = 0, phrase = phrases[0];
+    var running = function () { return !!ctx && ctx.state === 'running'; };
 
     function ensureCtx() {
       if (ctx) return true;
@@ -115,7 +127,7 @@
       o.start(t); o2.start(t); o.stop(t + dur + .1); o2.stop(t + dur + .1);
     }
     function tick() {
-      if (!on || !ctx) return;
+      if (!on || !running()) return;      // never queue notes while the browser is still holding audio back
       if (step === 0) phrase = phrases[Math.floor(Math.random() * phrases.length)];
       var d = phrase[step];
       if (d !== null && d !== undefined) pluck(scale[d], .085, 2.4);
@@ -136,12 +148,12 @@
       on = true; setUi();
       if (CFG.musicSrc) {
         if (!audioEl) { audioEl = new Audio(CFG.musicSrc); audioEl.loop = true; audioEl.volume = .45; }
-        audioEl.play().catch(function () { on = false; setUi(); });
+        var p = audioEl.play(); if (p && p.catch) p.catch(function () {});   // blocked until the first tap; retried then
         ensureCtx();
         return;
       }
       if (!ensureCtx()) { on = false; setUi(); return; }
-      ctx.resume();
+      var r = ctx.resume(); if (r && r.catch) r.catch(function () {});
       fade(.55, 2.5);
       if (!timer) timer = setInterval(tick, 820);
     }
@@ -151,20 +163,39 @@
       if (ctx) { fade(0, .8); setTimeout(function () { if (!on && ctx) ctx.suspend(); }, 900); }
       clearInterval(timer); timer = null;
     }
-    btn.addEventListener('click', function () { on ? stop() : start(); });
+    btn.addEventListener('click', function () {
+      if (on) { manualOff = true; stop(); } else { manualOff = false; start(); }
+    });
     document.addEventListener('visibilitychange', function () {
       if (!on) return;
       if (document.hidden) { if (ctx) ctx.suspend(); if (audioEl) audioEl.pause(); }
       else { if (ctx) ctx.resume(); if (audioEl) audioEl.play().catch(function () {}); }
     });
 
-    /* subtle effects, only when the guest has sound on */
+    /* Browsers only allow sound after a tap, click or key press. So music is switched on
+       from the start, and the first touch anywhere lets it begin. */
+    var gestures = ['pointerup', 'touchend', 'click', 'keydown'];
+    function unlock() {
+      if (!on || manualOff) return;
+      if (ctx && ctx.state !== 'running') { var r = ctx.resume(); if (r && r.catch) r.catch(function () {}); }
+      if (audioEl && audioEl.paused) audioEl.play().catch(function () {});
+      setTimeout(function () {
+        var ok = CFG.musicSrc ? (audioEl && !audioEl.paused) : running();
+        if (ok) gestures.forEach(function (g) { document.removeEventListener(g, unlock, true); });
+      }, 250);
+    }
+    if (wantOn) {
+      start();
+      gestures.forEach(function (g) { document.addEventListener(g, unlock, true); });
+    } else { setUi(); }
+
+    /* subtle effects, only while the music is on and running */
     function chime(notes) {
-      if (!on || !ctx) return;
-      notes.forEach(function (n, i) { setTimeout(function () { if (on) pluck(scale[n] * 2, .07, 1.8); }, i * 140); });
+      if (!on || !running()) return;
+      notes.forEach(function (n, i) { setTimeout(function () { if (on && running()) pluck(scale[n] * 2, .07, 1.8); }, i * 140); });
     }
     function whoosh(len) {
-      if (!on || !ctx) return;
+      if (!on || !running()) return;
       var n = Math.floor(ctx.sampleRate * len), buf = ctx.createBuffer(1, n, ctx.sampleRate), d = buf.getChannelData(0);
       for (var i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * Math.sin(Math.PI * i / n);
       var src = ctx.createBufferSource(); src.buffer = buf;
@@ -177,106 +208,210 @@
   })();
 
   /* ---------------------------------------------------------------
+     Small hand hints (tap / swipe). They appear a few seconds after a step
+     is waiting for the guest, and vanish as soon as the guest acts.
+     --------------------------------------------------------------- */
+  var HAND_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 14a8 8 0 0 1-8 8"/><path d="M18 11v-1a2 2 0 0 0-2-2a2 2 0 0 0-2 2"/><path d="M14 10V9a2 2 0 0 0-2-2a2 2 0 0 0-2 2v1"/><path d="M10 9.5V4a2 2 0 0 0-2-2a2 2 0 0 0-2 2v10"/><path d="M18 11a2 2 0 1 1 4 0v3a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></svg>';
+  function makeHand(kind, label, host, left, top) {
+    var el = document.createElement('div');
+    el.className = 'hand hand--' + kind;
+    el.setAttribute('aria-hidden', 'true');
+    el.innerHTML = HAND_SVG + '<span>' + label + '</span>';
+    if (left != null) { el.style.left = left; el.style.top = top; }
+    host.appendChild(el);
+    requestAnimationFrame(function () { requestAnimationFrame(function () { el.classList.add('is-on'); }); });
+    var gone = false;
+    return { hide: function () { if (gone) return; gone = true; el.classList.remove('is-on'); setTimeout(function () { el.remove(); }, 650); } };
+  }
+  /* After three seconds of inactivity, demonstrate an upward finger swipe. */
+  var scrollHintTimer = null, scrollHint = null;
+  function clearScrollHint() {
+    clearTimeout(scrollHintTimer); scrollHintTimer = null;
+    if (scrollHint) { scrollHint.hide(); scrollHint = null; }
+  }
+  function canShowScrollHint() {
+    if (root.classList.contains('intro-lock') || document.hidden) return false;
+    if (window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 24) return false;
+    var stage = $('#stage');
+    if (stage && !stage.classList.contains('is-open')) {
+      var r = stage.getBoundingClientRect();
+      var visible = Math.max(0, Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0));
+      // The curtain's tap hint takes priority while guests are on that step.
+      if (visible > Math.min(r.height, window.innerHeight) * .55) return false;
+    }
+    return true;
+  }
+  function armScrollHint(delay) {
+    clearScrollHint();
+    var y0 = window.scrollY;
+    scrollHintTimer = setTimeout(function () {
+      scrollHintTimer = null;
+      if (Math.abs(window.scrollY - y0) > 4 || !canShowScrollHint()) return;
+      scrollHint = makeHand('swipe', 'Swipe up to scroll', document.body);
+    }, delay);
+  }
+  window.addEventListener('scroll', function () { armScrollHint(3000); }, { passive: true });
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) clearScrollHint(); else armScrollHint(3000);
+  });
+
+  /* ---------------------------------------------------------------
      Opening film
+     Act 1: the couple pull the golden ropes (three joyful tugs, seal glows).
+     Act 2: the camera moves into the seal, the wax cracks, the flap lifts,
+            the card slides out of the envelope.
      --------------------------------------------------------------- */
   var intro = $('#intro');
   var scene = $('#scene');
-  var env = $('#env');
+  var frame = $('#picFrame');
+  var fx = $('#picFx');
+  var reveal = $('#reveal');
+  var revealFx = $('#revealFx');
+  var sealEl = $('.env__seal', intro);
   var btn = $('#introBtn');
   var skipBtn = $('#skipIntro');
-  var boyImg = $('#boyImg'), girlImg = $('#girlImg');
-  var chars = $$('.char', scene);
-  var ropes = [$('#rope0'), $('#rope1')];
   var state = 'idle'; // idle > playing > ready > done
   var cancelled = false;
-
-  // Hand position inside the "pull" artwork (160 x 290 box) and the tassel end of each rope
-  var ROPE_X = [141 / 160, 19 / 160];
-  var ROPE_Y = 192 / 290;
-
-  function updateRopes() {
-    var s = scene.getBoundingClientRect();
-    var e = env.getBoundingClientRect();
-    for (var i = 0; i < 2; i++) {
-      var c = chars[i].getBoundingClientRect();
-      var x1 = e.left - s.left + e.width * (i === 0 ? .17 : .83);
-      var y1 = e.top - s.top + e.height * .7;
-      var x2 = c.left - s.left + c.width * ROPE_X[i];
-      var y2 = c.top - s.top + c.height * ROPE_Y;
-      var dx = x2 - x1, dy = y2 - y1;
-      var len = Math.sqrt(dx * dx + dy * dy);
-      var ang = -Math.atan2(dx, dy) * 180 / Math.PI;
-      ropes[i].style.left = x1 + 'px';
-      ropes[i].style.top = y1 + 'px';
-      ropes[i].style.height = len + 'px';
-      ropes[i].style.transform = 'rotate(' + ang.toFixed(2) + 'deg)';
-    }
-  }
-  function setPull(px) { scene.style.setProperty('--pull', px.toFixed(1) + 'px'); updateRopes(); }
-  function tween(from, to, dur, ease) {
-    return new Promise(function (res) {
-      var t0 = performance.now();
-      (function f(t) {
-        var k = Math.min(1, (t - t0) / dur);
-        var e = ease ? ease(k) : k;
-        setPull(from + (to - from) * e);
-        if (k < 1 && !cancelled) requestAnimationFrame(f); else res();
-      })(t0);
-    });
-  }
-  var easeOut = function (k) { return 1 - Math.pow(1 - k, 3); };
-  var easeInOut = function (k) { return k < .5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2; };
-
-  function setPose(pose) {
-    boyImg.src = 'assets/boy-' + pose + '.svg';
-    girlImg.src = 'assets/girl-' + pose + '.svg';
-  }
-  // warm the cache so the pose swap is instant
-  ['pull', 'hold'].forEach(function (p) { new Image().src = 'assets/boy-' + p + '.svg'; new Image().src = 'assets/girl-' + p + '.svg'; });
+  var ctaHint = null, ctaHintTimer = null;
 
   function showCta(label) {
     btn.textContent = label;
     btn.disabled = false;
   }
+  function hideCtaHint() {
+    clearTimeout(ctaHintTimer); ctaHintTimer = null;
+    if (ctaHint) { ctaHint.hide(); ctaHint = null; }
+  }
+  function armCtaHint() {
+    hideCtaHint();
+    if (reduced) return;
+    ctaHintTimer = setTimeout(function () {
+      if (state === 'playing' || state === 'done') return;
+      var s = scene.getBoundingClientRect(), r = btn.getBoundingClientRect();
+      ctaHint = makeHand('tap', 'Tap', scene, (r.left - s.left + r.width * .58) + 'px', (r.top - s.top + r.height * .42) + 'px');
+    }, 3000);
+  }
+
+  /* happy sparkles and little hearts rising from the couple on every tug */
+  function emit(host, n, area) {
+    if (reduced || !host) return;
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < n; i++) {
+      var e = document.createElement('i');
+      var heart = Math.random() < .4;
+      e.className = 'fx ' + (heart ? 'fx--heart' : 'fx--spark');
+      e.style.setProperty('--x', rand(area[0], area[1]).toFixed(1) + '%');
+      e.style.setProperty('--y', rand(area[2], area[3]).toFixed(1) + '%');
+      e.style.setProperty('--s', rand(8, 18).toFixed(1) + 'px');
+      e.style.setProperty('--dx', rand(-26, 26).toFixed(0) + 'px');
+      e.style.animationDelay = rand(0, .25).toFixed(2) + 's';
+      frag.appendChild(e);
+    }
+    host.appendChild(frag);
+    setTimeout(function () { $$('.fx', host).slice(0, n).forEach(function (x) { x.remove(); }); }, 2200);
+  }
+
+  /* A single clock selects each pose and its two hand anchors together. */
+  var pullStarted = 0;
+  var handPositions = {
+    Boy: { rest: [.58, .16, .56, .29], reach: [.57, .055, .565, .20], tug: [.56, .37, .54, .45] },
+    Girl: { rest: [.40, .17, .40, .27], reach: [.33, .06, .35, .19], tug: [.42, .38, .435, .46] }
+  };
+  function trackRopes(now) {
+    if (!intro || intro.hidden || cancelled) return;
+    var s = scene.getBoundingClientRect();
+    var e = $('#env').getBoundingClientRect();
+    ['Boy', 'Girl'].forEach(function (name) {
+      var elapsed = pullStarted ? Math.max(0, (now || performance.now()) - pullStarted - (name === 'Girl' ? 80 : 0)) : 0;
+      var phase = (elapsed % 1350) / 1350;
+      var pose = 'rest';
+      if (pullStarted) {
+        pose = phase < .15 ? 'rest' : phase < .42 ? 'reach' : phase < .50 ? 'rest' : 'tug';
+        if (elapsed >= 4050 || intro.classList.contains('is-reveal')) pose = 'tug';
+      }
+      var figure = $('.character--' + name.toLowerCase());
+      figure.dataset.pose = pose;
+      var points = handPositions[name][pose];
+      var upper = $('#grip' + name), lower = $('#lower' + name);
+      upper.style.left = points[0] * 100 + '%'; upper.style.top = points[1] * 100 + '%';
+      lower.style.left = points[2] * 100 + '%'; lower.style.top = points[3] * 100 + '%';
+      var u = upper.getBoundingClientRect(), l = lower.getBoundingClientRect();
+      var x = u.left - s.left, y = u.top - s.top;
+      var lx = l.left - s.left, ly = l.top - s.top;
+      var ax = e.left - s.left + e.width * (name === 'Boy' ? .16 : .84);
+      var ay = e.top - s.top + e.height * .82;
+      var tail = ly + s.height * .10;
+      $('#rope' + name).setAttribute('d', 'M' + ax + ',' + ay + ' L' + x + ',' + y + ' L' + lx + ',' + ly + ' Q' + (lx - 3) + ',' + (ly + 25) + ' ' + (lx - 5) + ',' + tail);
+      $('#tassel' + name).setAttribute('transform', 'translate(' + (lx - 5) + ' ' + tail + ')');
+    });
+    if (!reduced) requestAnimationFrame(trackRopes);
+  }
+
+  var poseAssetsReady = Promise.all(['pull', 'reach', 'tug'].map(function (pose) {
+    return new Promise(function (resolve) {
+      var image = new Image();
+      image.onload = resolve;
+      image.onerror = resolve;
+      image.src = 'assets/couple-' + pose + '.webp';
+    });
+  }));
 
   async function play() {
     if (state !== 'idle') return;
     state = 'playing';
+    hideCtaHint();
     btn.disabled = true;
+    await poseAssetsReady;
+    if (cancelled) return;
+    $('#introStatus').textContent = 'The couple is pulling the ropes to open your invitation.';
     if (navigator.vibrate) { try { navigator.vibrate(12); } catch (e) {} }
-    intro.classList.add('is-excited');               // the little ones hop with excitement
-    await wait(1250); if (cancelled) return;
-    setPose('pull');                                  // they grab the golden ropes
-    var u = scene.clientHeight / 100;
     await wait(350); if (cancelled) return;
 
-    Sound.whoosh(.5);
-    await tween(0, u * 2.4, 420, easeOut); if (cancelled) return;      // pull one
-    env.classList.add('is-shake');
-    await tween(u * 2.4, u * .6, 280, easeInOut); if (cancelled) return;
-    intro.classList.add('is-glow');                   // the seal begins to glow
-    Sound.whoosh(.5);
-    await tween(u * .6, u * 2.8, 420, easeOut); if (cancelled) return;  // pull two
-    await tween(u * 2.8, u * 1, 260, easeInOut); if (cancelled) return;
+    pullStarted = performance.now();
+    intro.classList.add('is-pulling');                       // act 1: tug, tug, tug
     Sound.whoosh(.6);
-    await tween(u * 1, u * 3.2, 480, easeOut); if (cancelled) return;   // pull three, the final tug
-    await wait(150); if (cancelled) return;
+    [810, 2160, 3510].forEach(function (t, i) {
+      setTimeout(function () {
+        if (cancelled) return;
+        emit(fx, 7 + i * 2, [10, 92, 26, 58]);
+        if (i === 1) Sound.whoosh(.5);
+        if (i === 2) Sound.whoosh(.7);
+      }, t);
+    });
+    await wait(4250); if (cancelled) return;
 
-    intro.classList.remove('is-excited');
-    intro.classList.add('is-open');                   // flap folds open, card slides out
+    // The connected envelope moves forward after the final pull.
+    intro.classList.add('is-zoom', 'is-reveal', 'is-glow');
+    await wait(1000); if (cancelled) return;
+
+    intro.classList.add('is-crack');                         // the wax seal splits
+    Sound.chime([0, 2]);
+    emit(revealFx, 14, [-30, 30, -20, 20]);
+    await wait(650); if (cancelled) return;
+
+    intro.classList.add('is-open');
+    emit(fx, 20, [10, 92, 8, 48]);                          // the flap lifts, light spills out
+    Sound.whoosh(1);
+    await wait(750); if (cancelled) return;
+    intro.classList.add('is-flap-back');
+    await wait(850); if (cancelled) return;
+
+    intro.classList.add('is-out');                           // the card slides out
     Sound.chime([0, 2, 3, 5]);
-    tween(u * 3.2, 0, 900, easeOut);
-    setPose('cheer');
-    await wait(3000); if (cancelled) return;
+    await wait(1700); if (cancelled) return;
 
+    intro.classList.add('is-present');
     state = 'ready';
-    showCta('Open Our Wedding Invitation');
+    $('#introStatus').textContent = 'Your invitation is ready.';
+    showCta('View Our Wedding Invitation');
     btn.focus({ preventScroll: true });
+    armCtaHint();
   }
 
   function finishIntro() {
     if (state === 'done') return;
     state = 'done'; cancelled = true;
+    hideCtaHint();
     intro.classList.add('is-leaving');
     root.classList.remove('intro-lock');
     root.classList.add('invite-in');
@@ -285,15 +420,13 @@
     if (main) main.focus({ preventScroll: true });
     setTimeout(function () { intro.hidden = true; }, 1100);
     revealCheck();
+    armScrollHint(3000);
   }
 
   function initIntro() {
-    if (!intro || skipFromUrl) { if (intro) intro.hidden = true; root.classList.remove('intro-lock'); return; }
+    if (!intro || skipFromUrl) { if (intro) intro.hidden = true; root.classList.remove('intro-lock'); armScrollHint(3000); return; }
     dust($('#introDust'), 22);
-    window.addEventListener('resize', updateRopes);
-    window.addEventListener('orientationchange', function () { setTimeout(updateRopes, 250); });
-    updateRopes();
-    requestAnimationFrame(updateRopes);
+    trackRopes();
     btn.addEventListener('click', function () {
       if (state === 'idle') play();
       else if (state === 'ready') finishIntro();
@@ -304,11 +437,11 @@
     if (reduced) {
       // Reduced motion: show the finished scene at once, no animation
       state = 'ready';
-      intro.classList.add('is-open');
-      setPose('cheer');
+      intro.classList.add('is-zoom', 'is-reveal', 'is-open', 'is-flap-back', 'is-out', 'is-present');
       showCta('Open Our Wedding Invitation');
-    } else if (CFG.autoStartMs > 0) {
-      setTimeout(function () { if (state === 'idle') play(); }, CFG.autoStartMs);
+    } else {
+      if (CFG.autoStartMs > 0) setTimeout(function () { if (state === 'idle') play(); }, CFG.autoStartMs);
+      armCtaHint();
     }
     setTimeout(function () { btn.focus({ preventScroll: true }); }, 50);
   }
@@ -320,19 +453,36 @@
     var stage = $('#stage');
     var cbtn = $('#curtainBtn');
     if (!stage || !cbtn) return;
-    var opened = false;
+    var opened = false, hintTimer = null, hint = null;
+    function hideHint() { clearTimeout(hintTimer); hintTimer = null; if (hint) { hint.hide(); hint = null; } }
     function open() {
       if (opened) return;
       opened = true;
+      hideHint();
       stage.classList.add('is-open');
       Sound.whoosh(1.2); Sound.chime([0, 3, 5, 7]);
       setTimeout(function () { burst(stage); }, 700);
       if (navigator.vibrate) { try { navigator.vibrate(15); } catch (e) {} }
       $$('.curtain', stage).forEach(function (c) { c.setAttribute('aria-hidden', 'true'); });
+      armScrollHint(3000);                                 // nudge the guest to keep scrolling
     }
     cbtn.addEventListener('click', function (e) { e.stopPropagation(); open(); });
     stage.addEventListener('click', open);
-    if (reduced) stage.classList.add('is-open');
+    if (reduced) { stage.classList.add('is-open'); return; }
+    if ('IntersectionObserver' in window) {
+      new IntersectionObserver(function (entries) {
+        entries.forEach(function (en) {
+          if (opened) return;
+          if (en.isIntersecting) {
+            clearScrollHint();
+            if (!hintTimer && !hint) hintTimer = setTimeout(function () {
+              hintTimer = null;
+              hint = makeHand('tap', 'Tap', stage, 'calc(50% + 12px)', 'calc(50% + 6px)');
+            }, 3000);
+          } else { hideHint(); }
+        });
+      }, { threshold: .6 }).observe(stage);
+    }
   }
 
   /* ---------------------------------------------------------------
@@ -387,20 +537,6 @@
       // safety net: never leave content hidden
       setTimeout(function () { $$('.rv').forEach(function (el) { var r = el.getBoundingClientRect(); if (r.top < window.innerHeight) el.classList.add('in'); }); }, 4500);
     }
-
-    var tl = $('#timeline');
-    var ticking = false;
-    function rail() {
-      ticking = false;
-      if (!tl) return;
-      var r = tl.getBoundingClientRect();
-      var vh = window.innerHeight;
-      var p = (vh * .6 - r.top) / r.height;
-      tl.style.setProperty('--p', Math.max(0, Math.min(1, p)).toFixed(3));
-    }
-    window.addEventListener('scroll', function () { if (!ticking) { ticking = true; requestAnimationFrame(rail); } }, { passive: true });
-    window.addEventListener('resize', rail);
-    rail();
 
     var back = $('#backTop');
     if (back) back.addEventListener('click', function (e) {
